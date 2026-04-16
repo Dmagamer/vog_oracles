@@ -20,8 +20,19 @@ Set ATHEON constant to true if in Atheon room, false for oracles/templar. Run ma
 #### C++ version
 `main.cpp` is a C++ port of the note detector.
 
-Build (Linux/macOS with PortAudio installed):
-`g++ -std=c++17 -O2 main.cpp -lportaudio -o vog_oracles_cpp`
+It uses [miniaudio](https://miniaud.io/) — a single-header, actively maintained audio library that works on Linux, macOS, and Windows with no extra dependencies.
+
+The `miniaudio.h` header is included in this repository, so no separate install step is needed.
+
+Build (Linux/macOS):
+```
+g++ -std=c++17 -O2 main.cpp -lpthread -ldl -o vog_oracles_cpp
+```
+
+Build (Windows with MinGW):
+```
+g++ -std=c++17 -O2 main.cpp -o vog_oracles_cpp
+```
 
 Run:
 `./vog_oracles_cpp`
