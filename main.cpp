@@ -153,18 +153,6 @@ int main() {
         const DeviceChoice device = choose_input_device();
 
         PaStream* stream = nullptr;
-        check_pa(Pa_OpenDefaultStream(
-                     &stream,
-                     1,
-                     0,
-                     paInt16,
-                     FSAMP,
-                     FRAME_SIZE,
-                     nullptr,
-                     nullptr),
-                 "Pa_OpenDefaultStream failed");
-
-        check_pa(Pa_CloseStream(stream), "Pa_CloseStream failed");
 
         PaStreamParameters input_params{};
         input_params.device = device.index;
