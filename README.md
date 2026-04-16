@@ -17,6 +17,21 @@ Huge thanks to [mzucker](https://github.com/mzucker/python-tuner) on GitHub for 
 #### To use
 Set ATHEON constant to true if in Atheon room, false for oracles/templar. Run main.py. Your audio inputs will be listed numbered from 0 upwards, type the number for the audio input you want and press enter.
 
+#### C++ version
+`main.cpp` is a C++ port of the note detector.
+
+Build (Linux/macOS with PortAudio installed):
+`g++ -std=c++17 -O2 main.cpp -lportaudio -o vog_oracles_cpp`
+
+Run:
+`./vog_oracles_cpp`
+
+The note-to-number mapping is easily tweakable in `main.cpp` via:
+- `NOTE_CLOCKWISE_ORDER`
+
+Default clockwise mapping from your image, starting at C=1:
+- C=1, D=2, F#=3, A=4, Bb=5, G=6, E=7
+
 You will need to modify the constants for better results, use the debug modes to help with tweaking them. DECIBEL_CUTOFF helps to isolate background noise, but if too high it will prevent proper note detection. If you run in DEBUG mode 1 and see no output to the console its likely that DECIBEL_CUTOFF is too high. If it is at 0 and you still get no output to the console it means the audio input you selected has no audio output. 
 
 Variables might need to change between rooms, for example I found I had to drop my decibel cutoff from 20 to 15 for Atheon.
