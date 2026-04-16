@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <iostream>
 #include <limits>
@@ -10,7 +11,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include <portaudio.h>
+#define MINIAUDIO_IMPLEMENTATION
+#include "miniaudio.h"
 
 namespace {
 
@@ -81,37 +83,74 @@ inline double note_to_fftbin(double n) {
 }
 
 struct DeviceChoice {
-    PaDeviceIndex index;
+    ma_device_id id;
+    std::string name;
 };
 
 DeviceChoice choose_input_device() {
-    const int num_devices = Pa_GetDeviceCount();
-    if (num_devices < 0) {
-        throw std::runtime_error("PortAudio failed to list devices");
+    ma_context context;
+    if (ma_context_init(nullptr, 0, nullptr, &context) != MA_SUCCESS) {
+        throw std::runtime_error("Failed to initialize audio context");
     }
 
-    std::vector<PaDeviceIndex> valid;
-    for (PaDeviceIndex i = 0; i < num_devices; ++i) {
-        const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
-        if (info != nullptr && info->maxInputChannels > 0) {
-            std::cout << "Input Device id " << i << " - " << info->name << '\n';
-            valid.push_back(i);
-        }
+    ma_device_info* pPlaybackInfos;
+    ma_uint32 playbackCount;
+    ma_device_info* pCaptureInfos;
+    ma_uint32 captureCount;
+
+    if (ma_context_get_devices(&context, &pPlaybackInfos, &playbackCount, &pCaptureInfos, &captureCount) != MA_SUCCESS) {
+        ma_context_uninit(&context);
+        throw std::runtime_error("Failed to list audio devices");
     }
 
-    if (valid.empty()) {
+    if (captureCount == 0) {
+        ma_context_uninit(&context);
         throw std::runtime_error("No input devices available");
+    }
+
+    for (ma_uint32 i = 0; i < captureCount; ++i) {
+        std::cout << "Input Device id " << i << " - " << pCaptureInfos[i].name << '\n';
     }
 
     std::cout << "Please choose a device ID: ";
     int selected = -1;
     std::cin >> selected;
 
-    if (std::find(valid.begin(), valid.end(), selected) == valid.end()) {
+    if (selected < 0 || static_cast<ma_uint32>(selected) >= captureCount) {
+        ma_context_uninit(&context);
         throw std::runtime_error("Invalid device ID selected");
     }
 
-    return DeviceChoice{static_cast<PaDeviceIndex>(selected)};
+    DeviceChoice choice{pCaptureInfos[selected].id, pCaptureInfos[selected].name};
+    ma_context_uninit(&context);
+    return choice;
+}
+
+// Ring buffer shared between the capture callback and the main thread.
+struct CaptureContext {
+    ma_pcm_rb rb{};
+};
+
+static void capture_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
+    (void)pOutput;
+    auto* ctx = static_cast<CaptureContext*>(pDevice->pUserData);
+    if (pInput == nullptr) {
+        return;
+    }
+
+    const auto* src = static_cast<const int16_t*>(pInput);
+    ma_uint32 remaining = frameCount;
+    while (remaining > 0) {
+        ma_uint32 frames = remaining;
+        void* pBuffer = nullptr;
+        if (ma_pcm_rb_acquire_write(&ctx->rb, &frames, &pBuffer) != MA_SUCCESS || frames == 0) {
+            break;
+        }
+        std::memcpy(pBuffer, src, frames * sizeof(int16_t));
+        ma_pcm_rb_commit_write(&ctx->rb, frames);
+        src += frames;
+        remaining -= frames;
+    }
 }
 
 double goertzel_magnitude(const std::vector<double>& samples, std::size_t k) {
@@ -138,41 +177,38 @@ std::string note_to_output(const std::string& note) {
     return std::to_string(it->second);
 }
 
-void check_pa(PaError err, const char* context) {
-    if (err != paNoError) {
-        throw std::runtime_error(std::string(context) + ": " + Pa_GetErrorText(err));
-    }
-}
-
 }  // namespace
 
 int main() {
     try {
-        check_pa(Pa_Initialize(), "Pa_Initialize failed");
-
         const DeviceChoice device = choose_input_device();
 
-        PaStream* stream = nullptr;
+        CaptureContext capCtx;
+        // Ring buffer: 16× frame size gives comfortable headroom.
+        constexpr ma_uint32 RB_FRAMES = static_cast<ma_uint32>(FRAME_SIZE * 16);
+        if (ma_pcm_rb_init(ma_format_s16, 1, RB_FRAMES, nullptr, nullptr, &capCtx.rb) != MA_SUCCESS) {
+            throw std::runtime_error("Failed to initialize ring buffer");
+        }
 
-        PaStreamParameters input_params{};
-        input_params.device = device.index;
-        input_params.channelCount = 1;
-        input_params.sampleFormat = paInt16;
-        input_params.suggestedLatency = Pa_GetDeviceInfo(device.index)->defaultLowInputLatency;
-        input_params.hostApiSpecificStreamInfo = nullptr;
+        ma_device_config cfg = ma_device_config_init(ma_device_type_capture);
+        cfg.capture.pDeviceID  = const_cast<ma_device_id*>(&device.id);
+        cfg.capture.format     = ma_format_s16;
+        cfg.capture.channels   = 1;
+        cfg.sampleRate         = static_cast<ma_uint32>(FSAMP);
+        cfg.dataCallback       = capture_callback;
+        cfg.pUserData          = &capCtx;
 
-        check_pa(Pa_OpenStream(
-                     &stream,
-                     &input_params,
-                     nullptr,
-                     FSAMP,
-                     FRAME_SIZE,
-                     paClipOff,
-                     nullptr,
-                     nullptr),
-                 "Pa_OpenStream failed");
+        ma_device maDevice;
+        if (ma_device_init(nullptr, &cfg, &maDevice) != MA_SUCCESS) {
+            ma_pcm_rb_uninit(&capCtx.rb);
+            throw std::runtime_error("Failed to initialize audio device");
+        }
 
-        check_pa(Pa_StartStream(stream), "Pa_StartStream failed");
+        if (ma_device_start(&maDevice) != MA_SUCCESS) {
+            ma_device_uninit(&maDevice);
+            ma_pcm_rb_uninit(&capCtx.rb);
+            throw std::runtime_error("Failed to start audio device");
+        }
 
         const std::size_t imin = std::max<std::size_t>(0, static_cast<std::size_t>(std::floor(note_to_fftbin(NOTE_MIN - 1))));
         const std::size_t imax = std::min<std::size_t>(SAMPLES_PER_FFT, static_cast<std::size_t>(std::ceil(note_to_fftbin(NOTE_MAX + 1))));
@@ -193,14 +229,26 @@ int main() {
         std::deque<std::string> sequence(QUEUE_LENGTH, "");
         std::size_t num_frames = 0;
 
-        while (Pa_IsStreamActive(stream) == 1) {
+        while (true) {
             ++samples_without_char;
             if (samples_without_char == 35 || samples_without_char == 100) {
                 last_printed_note.clear();
                 std::cout << '\n';
             }
 
-            check_pa(Pa_ReadStream(stream, frame.data(), FRAME_SIZE), "Pa_ReadStream failed");
+            // Block until FRAME_SIZE int16 frames have been read from the ring buffer.
+            ma_uint32 framesRead = 0;
+            while (framesRead < static_cast<ma_uint32>(FRAME_SIZE)) {
+                ma_uint32 frames = static_cast<ma_uint32>(FRAME_SIZE) - framesRead;
+                void* pBuffer = nullptr;
+                if (ma_pcm_rb_acquire_read(&capCtx.rb, &frames, &pBuffer) == MA_SUCCESS && frames > 0) {
+                    std::memcpy(frame.data() + framesRead, pBuffer, frames * sizeof(int16_t));
+                    ma_pcm_rb_commit_read(&capCtx.rb, frames);
+                    framesRead += frames;
+                } else {
+                    ma_sleep(1);
+                }
+            }
 
             std::move(buf.begin() + FRAME_SIZE, buf.end(), buf.begin());
             for (std::size_t i = 0; i < FRAME_SIZE; ++i) {
@@ -276,12 +324,11 @@ int main() {
             }
         }
 
-        check_pa(Pa_StopStream(stream), "Pa_StopStream failed");
-        check_pa(Pa_CloseStream(stream), "Pa_CloseStream failed");
-        check_pa(Pa_Terminate(), "Pa_Terminate failed");
+        ma_device_stop(&maDevice);
+        ma_device_uninit(&maDevice);
+        ma_pcm_rb_uninit(&capCtx.rb);
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << '\n';
-        Pa_Terminate();
         return 1;
     }
 
