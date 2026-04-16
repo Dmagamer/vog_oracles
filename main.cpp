@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -9,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #define MINIAUDIO_IMPLEMENTATION
@@ -22,15 +24,18 @@ constexpr bool ATHEON = false;
 constexpr int DEBUG = 0;
 
 // Ignore notes below this volume.
-constexpr double DECIBEL_CUTOFF = 20.0;
+constexpr double DECIBEL_CUTOFF = 22.0;
 // Must be this close to the note.
-constexpr double DIFF_CUTOFF = 0.04;
+constexpr double DIFF_CUTOFF = 0.025;
 // B flat special condition.
 constexpr double B_FLAT_MIN = 59.05;
 constexpr double B_FLAT_MAX = 59.17;
 
-constexpr std::size_t QUEUE_LENGTH = 8;
-constexpr std::size_t NOTES_IN_QUEUE_REQUIRED = 5;
+constexpr std::size_t QUEUE_LENGTH = 10;
+constexpr std::size_t NOTES_IN_QUEUE_REQUIRED = 6;
+constexpr std::size_t MAX_ORACLES_PER_ROUND = 7;
+constexpr std::array<std::size_t, 2> ROUND_PHASE_COUNTS = {3, 4};
+constexpr int SILENCE_FRAMES_FOR_ROUND_BOUNDARY = 24;
 
 // Constants for note calculations.
 constexpr int NOTE_MIN = 60;
@@ -177,6 +182,65 @@ std::string note_to_output(const std::string& note) {
     return std::to_string(it->second);
 }
 
+struct OraclePlayback {
+    std::vector<std::string> notes;
+    std::unordered_set<std::string> seen_notes;
+    std::size_t phase_index = 0;
+    std::size_t phase_count = 0;
+};
+
+struct OracleRoundTracker {
+    OraclePlayback first_playback;
+    OraclePlayback second_playback;
+    bool first_playback_complete = false;
+    int silence_frames = 0;
+};
+
+void reset_playback(OraclePlayback& playback) {
+    playback.notes.clear();
+    playback.seen_notes.clear();
+    playback.phase_index = 0;
+    playback.phase_count = 0;
+}
+
+void reset_round(OracleRoundTracker& tracker) {
+    reset_playback(tracker.first_playback);
+    reset_playback(tracker.second_playback);
+    tracker.first_playback_complete = false;
+    tracker.silence_frames = 0;
+}
+
+bool add_note_to_playback(OraclePlayback& playback, const std::string& note) {
+    if (playback.notes.size() >= MAX_ORACLES_PER_ROUND) {
+        return false;
+    }
+    if (playback.seen_notes.find(note) != playback.seen_notes.end()) {
+        return false;
+    }
+
+    if (playback.phase_index >= ROUND_PHASE_COUNTS.size()) {
+        return false;
+    }
+    if (playback.phase_count >= ROUND_PHASE_COUNTS[playback.phase_index]) {
+        ++playback.phase_index;
+        playback.phase_count = 0;
+        if (playback.phase_index >= ROUND_PHASE_COUNTS.size()) {
+            return false;
+        }
+    }
+
+    playback.notes.push_back(note);
+    playback.seen_notes.insert(note);
+    ++playback.phase_count;
+
+    if (playback.phase_count == ROUND_PHASE_COUNTS[playback.phase_index]) {
+        ++playback.phase_index;
+        playback.phase_count = 0;
+    }
+
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -228,6 +292,7 @@ int main() {
         int samples_without_char = 0;
         std::deque<std::string> sequence(QUEUE_LENGTH, "");
         std::size_t num_frames = 0;
+        OracleRoundTracker round_tracker;
 
         while (true) {
             ++samples_without_char;
@@ -276,8 +341,20 @@ int main() {
 
             const double decibel = decibel_sum / static_cast<double>(imax - imin);
             if (decibel < DECIBEL_CUTOFF) {
+                ++round_tracker.silence_frames;
+                if (round_tracker.silence_frames >= SILENCE_FRAMES_FOR_ROUND_BOUNDARY) {
+                    if (!round_tracker.first_playback_complete && !round_tracker.first_playback.notes.empty()) {
+                        round_tracker.first_playback_complete = true;
+                        reset_playback(round_tracker.second_playback);
+                        last_printed_note.clear();
+                    } else if (round_tracker.first_playback_complete && !round_tracker.second_playback.notes.empty()) {
+                        reset_round(round_tracker);
+                        last_printed_note.clear();
+                    }
+                }
                 continue;
             }
+            round_tracker.silence_frames = 0;
 
             const double freq = static_cast<double>(max_bin) * FREQ_STEP;
             const double n = freq_to_number(freq);
@@ -309,16 +386,42 @@ int main() {
                     }
 
                     const std::size_t same_count = static_cast<std::size_t>(std::count(sequence.begin(), sequence.end(), note));
-                    if (same_count == NOTES_IN_QUEUE_REQUIRED && last_printed_note != note) {
-                        const std::string out = note_to_output(note);
-                        if (DEBUG != 0) {
-                            std::cout << "IF NOT DEBUG " << out << '\n';
+                    if (same_count >= NOTES_IN_QUEUE_REQUIRED && last_printed_note != note) {
+                        if (!round_tracker.first_playback_complete) {
+                            if (add_note_to_playback(round_tracker.first_playback, note)) {
+                                last_printed_note = note;
+                                samples_without_char = 0;
+                                if (round_tracker.first_playback.notes.size() == MAX_ORACLES_PER_ROUND) {
+                                    round_tracker.first_playback_complete = true;
+                                    reset_playback(round_tracker.second_playback);
+                                }
+                            }
                         } else {
-                            std::cout << out;
-                            std::cout.flush();
+                            const std::size_t second_index = round_tracker.second_playback.notes.size();
+                            if (second_index >= round_tracker.first_playback.notes.size()) {
+                                reset_round(round_tracker);
+                            } else if (round_tracker.first_playback.notes[second_index] != note) {
+                                reset_round(round_tracker);
+                                if (add_note_to_playback(round_tracker.first_playback, note)) {
+                                    last_printed_note = note;
+                                    samples_without_char = 0;
+                                }
+                            } else if (add_note_to_playback(round_tracker.second_playback, note)) {
+                                const std::string out = note_to_output(note);
+                                if (DEBUG != 0) {
+                                    std::cout << "IF NOT DEBUG " << out << '\n';
+                                } else {
+                                    std::cout << out;
+                                    std::cout.flush();
+                                }
+                                last_printed_note = note;
+                                samples_without_char = 0;
+
+                                if (round_tracker.second_playback.notes.size() == MAX_ORACLES_PER_ROUND) {
+                                    reset_round(round_tracker);
+                                }
+                            }
                         }
-                        last_printed_note = note;
-                        samples_without_char = 0;
                     }
                 }
             }
