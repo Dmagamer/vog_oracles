@@ -4,6 +4,7 @@
 #include <deque>
 #include <iostream>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -37,6 +38,7 @@ constexpr std::size_t FRAME_SIZE = 2096;
 constexpr std::size_t FRAMES_PER_FFT = 16;
 constexpr std::size_t SAMPLES_PER_FFT = FRAME_SIZE * FRAMES_PER_FFT;
 constexpr double FREQ_STEP = FSAMP / static_cast<double>(SAMPLES_PER_FFT);
+constexpr double PI = 3.14159265358979323846;
 
 // Clockwise note order with C as 1. Edit this vector to tweak mapping.
 const std::vector<std::string> NOTE_CLOCKWISE_ORDER = {"C", "D", "F#", "A", "Bb", "G", "E"};
@@ -113,7 +115,7 @@ DeviceChoice choose_input_device() {
 }
 
 double goertzel_magnitude(const std::vector<double>& samples, std::size_t k) {
-    const double omega = 2.0 * M_PI * static_cast<double>(k) / static_cast<double>(samples.size());
+    const double omega = 2.0 * PI * static_cast<double>(k) / static_cast<double>(samples.size());
     const double coeff = 2.0 * std::cos(omega);
 
     double s_prev = 0.0;
@@ -193,7 +195,7 @@ int main() {
         std::vector<double> windowed(SAMPLES_PER_FFT, 0.0);
 
         for (std::size_t i = 0; i < SAMPLES_PER_FFT; ++i) {
-            window[i] = 0.5 * (1.0 - std::cos((2.0 * M_PI * static_cast<double>(i)) / static_cast<double>(SAMPLES_PER_FFT)));
+            window[i] = 0.5 * (1.0 - std::cos((2.0 * PI * static_cast<double>(i)) / static_cast<double>(SAMPLES_PER_FFT)));
         }
 
         const double window_sum = std::accumulate(window.begin(), window.end(), 0.0);
